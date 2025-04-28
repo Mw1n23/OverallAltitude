@@ -21,3 +21,6 @@ This repository contains Python scripts to analyze GPX tracks, focusing on eleva
 - Detection of loops in the track.
 - Visualization of elevation profile with slope percentages.
 
+## Output of `Track_analysis-05.py`
+- Prints the total ascent, descent, net elevation difference, average distance between points, and detected loops.
+- Displays a plot of the elevation profile with slope percentages and loop markers.
