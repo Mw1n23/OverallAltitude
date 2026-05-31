@@ -1,23 +1,32 @@
-## GPX Elevation Analysis
+# GPX Elevation Analysis
 
-This repository contains Python scripts to analyze GPX tracks, focusing on elevation gain, track analysis, and data conversion.
+## Overview
+Python-based analysis of GPX tracks with smoothing, thresholding, outlier handling, and elevation profile plotting.
 
-### Repository Structure
-- `OverallAltitude/`
-  - `Code/`
-    - `Track_analysis-05.py`: Analyzes elevation gain from GPX tracks with smoothing, thresholding, and plotting (version 0.5).
-  - `RawMaterial/`
-    - `WACHAUmarathon_Marathon.gpx`: Sample GPX file (Wachau Marathon track).
-    - `wallersee1lauf.gpx`: Sample GPX file (Wallersee run track).
-- `README.md`: This file.
+## Structure
+- `OverallAltitude/Code/Track_analysis_05.py`: main script.
+- `OverallAltitude/RawMaterial/`: sample GPX files.
+- `requirements.txt`: runtime dependencies.
+- `tests/`: lightweight quality checks.
 
-### Features of `Track_analysis-05.py`
-- Smoothing of elevation data to reduce GPS noise.
-- Threshold-based filtering of small elevation changes.
-- Outlier detection and correction.
-- Detection of loops in the track.
-- Visualization of elevation profile with slope percentages.
+## Setup
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-### Output of `Track_analysis-05.py`
-- Prints the total ascent, descent, net elevation difference, average distance between points, and detected loops.
-- Displays a plot of the elevation profile with slope percentages and loop markers.
+## Run
+```bash
+python OverallAltitude/Code/Track_analysis_05.py
+```
+
+With explicit input:
+```bash
+python OverallAltitude/Code/Track_analysis_05.py --gpx-file ../RawMaterial/WACHAUmarathon_Marathon.gpx
+```
+
+## Tests
+```bash
+pytest -q
+```
