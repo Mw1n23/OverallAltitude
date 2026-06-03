@@ -1,218 +1,832 @@
-import xml.etree.ElementTree as ET
-import matplotlib.pyplot as plt
-import numpy as np
-from geopy.distance import geodesic
-import os
+from __future__ import annotations
+
 import argparse
+import json
+import math
+import os
+import sqlite3
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import warnings
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
 
-def parse_gpx(file_path):
-    try:
-        tree = ET.parse(file_path)
-        root = tree.getroot()
-        
-        ns = {'default': 'http://www.topografix.com/GPX/1/1'}
-        trkpts = root.findall('.//default:trkpt', ns)
-        
-        waypoints = []
-        elevations = []
-        
-        for trkpt in trkpts:
-            lat = float(trkpt.attrib['lat'])
-            lon = float(trkpt.attrib['lon'])
-            ele = trkpt.find('default:ele', ns)
-            if ele is not None:
-                elevations.append(float(ele.text))
-                waypoints.append((lat, lon))
-        
-        return waypoints, elevations
-    except ET.ParseError:
-        raise ValueError("Error parsing the GPX file. Ensure the file is valid.")
-    except Exception as e:
-        raise RuntimeError(f"An error occurred: {e}")
 
-def smooth_elevations(elevations, window_size=5):
-    """Smooth elevation data using a moving average filter."""
-    return np.convolve(elevations, np.ones(window_size)/window_size, mode='same')
+GPX_NAMESPACE = {"default": "http://www.topografix.com/GPX/1/1"}
+SCRIPT_PATH = Path(__file__).resolve()
+DEFAULT_GPX_FILE = SCRIPT_PATH.parent.parent / "RawMaterial" / "WACHAUmarathon_Marathon.gpx"
+DEFAULT_DATASET = "eudem25m,mapzen"
 
-def handle_outliers(elevations, max_change=50.0):
-    """Replace outliers in elevation data with interpolated values."""
-    cleaned_elevations = elevations.copy()
-    for i in range(1, len(cleaned_elevations)):
-        change = abs(cleaned_elevations[i] - cleaned_elevations[i-1])
-        if change > max_change:
-            if i < len(cleaned_elevations) - 1:
-                cleaned_elevations[i] = (cleaned_elevations[i-1] + cleaned_elevations[i+1]) / 2
+
+def default_cache_db() -> Path:
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+    base_dir = Path(xdg_cache_home) if xdg_cache_home else Path.home() / ".cache"
+    return base_dir / "overall-altitude" / "elevation_cache.sqlite3"
+
+
+DEFAULT_CACHE_DB = default_cache_db()
+
+
+@dataclass(frozen=True)
+class TrackPoint:
+    latitude: float
+    longitude: float
+    elevation_m: float | None
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    source_label: str
+    dataset_label: str | None
+    total_distance_m: float
+    total_ascent_m: float
+    total_descent_m: float
+    net_difference_m: float
+    average_point_spacing_m: float
+    raw_point_count: int
+    analysis_point_count: int
+    raw_distances_m: list[float]
+    raw_elevations_m: list[float]
+    analysis_distances_m: list[float]
+    analysis_elevations_m: list[float]
+
+
+class ElevationServiceError(RuntimeError):
+    """Raised when the external elevation source cannot satisfy a request."""
+
+
+class BatchRequestTooLargeError(ElevationServiceError):
+    """Raised when a batch request has to be split into smaller chunks."""
+
+
+class ElevationCache:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.connection = sqlite3.connect(path)
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS elevation_cache (
+                provider TEXT NOT NULL,
+                dataset TEXT NOT NULL,
+                interpolation TEXT NOT NULL,
+                latitude TEXT NOT NULL,
+                longitude TEXT NOT NULL,
+                elevation REAL,
+                PRIMARY KEY (provider, dataset, interpolation, latitude, longitude)
+            )
+            """
+        )
+        self.connection.commit()
+
+    @staticmethod
+    def _coord_key(value: float) -> str:
+        return f"{value:.6f}"
+
+    def get(
+        self,
+        provider: str,
+        dataset: str,
+        interpolation: str,
+        latitude: float,
+        longitude: float,
+    ) -> tuple[bool, float | None]:
+        row = self.connection.execute(
+            """
+            SELECT elevation
+            FROM elevation_cache
+            WHERE provider = ? AND dataset = ? AND interpolation = ? AND latitude = ? AND longitude = ?
+            """,
+            (
+                provider,
+                dataset,
+                interpolation,
+                self._coord_key(latitude),
+                self._coord_key(longitude),
+            ),
+        ).fetchone()
+        if row is None:
+            return False, None
+        return True, row[0]
+
+    def put_many(
+        self,
+        provider: str,
+        dataset: str,
+        interpolation: str,
+        rows: Iterable[tuple[float, float, float | None]],
+    ) -> None:
+        payload = [
+            (
+                provider,
+                dataset,
+                interpolation,
+                self._coord_key(latitude),
+                self._coord_key(longitude),
+                elevation,
+            )
+            for latitude, longitude, elevation in rows
+        ]
+        if not payload:
+            return
+        self.connection.executemany(
+            """
+            INSERT OR REPLACE INTO elevation_cache
+            (provider, dataset, interpolation, latitude, longitude, elevation)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            payload,
+        )
+        self.connection.commit()
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> "ElevationCache":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+class OpenTopoDataClient:
+    provider_name = "opentopodata"
+
+    def __init__(
+        self,
+        dataset: str = DEFAULT_DATASET,
+        base_url: str = "https://api.opentopodata.org/v1",
+        interpolation: str = "bilinear",
+        timeout_seconds: float = 15.0,
+        batch_size: int = 200,
+        max_retries: int = 3,
+        cache: ElevationCache | None = None,
+    ):
+        self.dataset = dataset
+        self.base_url = base_url.rstrip("/")
+        self.interpolation = interpolation
+        self.timeout_seconds = timeout_seconds
+        self.batch_size = batch_size
+        self.max_retries = max_retries
+        self.cache = cache
+
+    def lookup(self, points: Sequence[TrackPoint]) -> list[float | None]:
+        results: list[float | None] = [None] * len(points)
+        missing_indices: list[int] = []
+
+        for index, point in enumerate(points):
+            if self.cache is None:
+                missing_indices.append(index)
+                continue
+            cached, elevation = self.cache.get(
+                self.provider_name,
+                self.dataset,
+                self.interpolation,
+                point.latitude,
+                point.longitude,
+            )
+            if cached:
+                results[index] = elevation
             else:
-                cleaned_elevations[i] = cleaned_elevations[i-1]
-    return cleaned_elevations
+                missing_indices.append(index)
 
-def calculate_elevation_changes(elevations, step=1, threshold=1.0, window_size=5, max_change=50.0):
-    """Calculate total ascent and descent with smoothing, threshold, and outlier handling."""
-    elevations = handle_outliers(elevations, max_change=max_change)
-    smoothed_elevations = smooth_elevations(elevations, window_size=window_size)
-    
-    total_ascent = 0
-    total_descent = 0
-    elevation_changes = []
-    
-    for i in range(step, len(smoothed_elevations), step):
-        change = smoothed_elevations[i] - smoothed_elevations[i-step]
-        elevation_changes.append(change)
-        if change > threshold:
-            total_ascent += change
-        elif change < -threshold:
-            total_descent += abs(change)
-    
-    overall_difference = elevations[-1] - elevations[0]
-    
-    return total_ascent, total_descent, overall_difference, elevation_changes, smoothed_elevations
+        pending_batches = [
+            missing_indices[start : start + self.batch_size]
+            for start in range(0, len(missing_indices), self.batch_size)
+        ]
 
-def calculate_distances(waypoints):
+        while pending_batches:
+            batch_indices = pending_batches.pop(0)
+            batch_points = [points[index] for index in batch_indices]
+            try:
+                elevations = self._fetch_batch(batch_points)
+            except BatchRequestTooLargeError:
+                if len(batch_indices) == 1:
+                    raise ElevationServiceError(
+                        "Elevation service rejected a single-point request."
+                    )
+                midpoint = len(batch_indices) // 2
+                pending_batches.insert(0, batch_indices[midpoint:])
+                pending_batches.insert(0, batch_indices[:midpoint])
+                continue
+            if len(elevations) != len(batch_points):
+                raise ElevationServiceError(
+                    "The elevation service returned an unexpected number of results."
+                )
+            for index, elevation in zip(batch_indices, elevations):
+                results[index] = elevation
+            if self.cache is not None:
+                self.cache.put_many(
+                    self.provider_name,
+                    self.dataset,
+                    self.interpolation,
+                    [
+                        (point.latitude, point.longitude, elevation)
+                        for point, elevation in zip(batch_points, elevations)
+                    ],
+                )
+
+        return results
+
+    def _fetch_batch(self, points: Sequence[TrackPoint]) -> list[float | None]:
+        locations = "|".join(
+            f"{point.latitude:.6f},{point.longitude:.6f}" for point in points
+        )
+        query = urllib.parse.urlencode(
+            {
+                "locations": locations,
+                "interpolation": self.interpolation,
+                "nodata_value": "null",
+            }
+        )
+        dataset_path = urllib.parse.quote(self.dataset, safe=",")
+        url = f"{self.base_url}/{dataset_path}?{query}"
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "OverallAltitude/2.0"},
+        )
+
+        payload = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in {400, 414} and len(points) > 1:
+                    raise BatchRequestTooLargeError(
+                        f"Batch request with {len(points)} points was rejected by the service."
+                    ) from exc
+                if exc.code == 429 and attempt < self.max_retries:
+                    retry_after_header = exc.headers.get("Retry-After")
+                    if retry_after_header and retry_after_header.isdigit():
+                        sleep_seconds = float(retry_after_header)
+                    else:
+                        sleep_seconds = 1.5 * (attempt + 1)
+                    time.sleep(sleep_seconds)
+                    continue
+                raise ElevationServiceError(f"Cannot reach elevation service: {exc}") from exc
+            except urllib.error.URLError as exc:
+                raise ElevationServiceError(f"Cannot reach elevation service: {exc}") from exc
+            except json.JSONDecodeError as exc:
+                raise ElevationServiceError("Elevation service returned invalid JSON.") from exc
+
+        if payload is None:
+            raise ElevationServiceError("Elevation service returned no payload.")
+        if payload.get("status") != "OK":
+            message = payload.get("error", "Unknown elevation service error.")
+            raise ElevationServiceError(message)
+
+        results = payload.get("results", [])
+        return [entry.get("elevation") for entry in results]
+
+
+def parse_gpx(file_path: Path) -> list[TrackPoint]:
+    try:
+        root = ET.parse(file_path).getroot()
+    except ET.ParseError as exc:
+        raise ValueError("Error parsing the GPX file. Ensure the file is valid.") from exc
+
+    track_points: list[TrackPoint] = []
+    for trkpt in root.findall(".//default:trkpt", GPX_NAMESPACE):
+        latitude = float(trkpt.attrib["lat"])
+        longitude = float(trkpt.attrib["lon"])
+        elevation_node = trkpt.find("default:ele", GPX_NAMESPACE)
+        elevation = float(elevation_node.text) if elevation_node is not None else None
+        track_points.append(TrackPoint(latitude, longitude, elevation))
+
+    if not track_points:
+        raise ValueError("The GPX file does not contain any track points.")
+
+    return track_points
+
+
+def haversine_distance_m(point_a: TrackPoint, point_b: TrackPoint) -> float:
+    radius_m = 6_371_000.0
+    lat1 = math.radians(point_a.latitude)
+    lon1 = math.radians(point_a.longitude)
+    lat2 = math.radians(point_b.latitude)
+    lon2 = math.radians(point_b.longitude)
+    d_lat = lat2 - lat1
+    d_lon = lon2 - lon1
+
+    hav = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(d_lon / 2) ** 2
+    )
+    return 2 * radius_m * math.atan2(math.sqrt(hav), math.sqrt(1 - hav))
+
+
+def cumulative_distances(points: Sequence[TrackPoint]) -> list[float]:
     distances = [0.0]
-    for i in range(1, len(waypoints)):
-        distance = geodesic(waypoints[i-1], waypoints[i]).kilometers * 1000
-        distances.append(distances[-1] + distance)
+    for previous, current in zip(points, points[1:]):
+        distances.append(distances[-1] + haversine_distance_m(previous, current))
     return distances
 
-def detect_circles(waypoints, threshold=0.005, min_distance=3):
-    visited_segments = set()
-    circles = []
-    n = len(waypoints)
 
-    for start in range(n):
-        if start in visited_segments:
-            continue
+def interpolate_point(
+    point_a: TrackPoint,
+    point_b: TrackPoint,
+    fraction: float,
+) -> TrackPoint:
+    latitude = point_a.latitude + (point_b.latitude - point_a.latitude) * fraction
+    longitude = point_a.longitude + (point_b.longitude - point_a.longitude) * fraction
 
-        for end in range(start + 1, n):
-            if geodesic(waypoints[start], waypoints[end]).kilometers < threshold:
-                if calculate_circle_distance(waypoints, start, end) >= min_distance:
-                    visited_segments.update(range(start, end + 1))
-                    circles.append((start, end))
-                break
+    if point_a.elevation_m is not None and point_b.elevation_m is not None:
+        elevation = point_a.elevation_m + (point_b.elevation_m - point_a.elevation_m) * fraction
+    else:
+        elevation = point_a.elevation_m if fraction < 0.5 else point_b.elevation_m
+
+    return TrackPoint(latitude, longitude, elevation)
+
+
+def resample_track(points: Sequence[TrackPoint], spacing_m: float) -> tuple[list[TrackPoint], list[float]]:
+    raw_distances = cumulative_distances(points)
+    total_distance_m = raw_distances[-1]
+    if spacing_m <= 0 or total_distance_m == 0:
+        return list(points), raw_distances
+
+    targets = [0.0]
+    current = spacing_m
+    while current < total_distance_m:
+        targets.append(current)
+        current += spacing_m
+    if targets[-1] != total_distance_m:
+        targets.append(total_distance_m)
+
+    resampled_points: list[TrackPoint] = []
+    resampled_distances: list[float] = []
+    segment_index = 1
+
+    for target_distance in targets:
+        while (
+            segment_index < len(raw_distances) - 1
+            and raw_distances[segment_index] < target_distance
+        ):
+            segment_index += 1
+
+        previous_index = max(0, segment_index - 1)
+        next_index = segment_index
+        previous_distance = raw_distances[previous_index]
+        next_distance = raw_distances[next_index]
+        span = next_distance - previous_distance
+
+        if span == 0:
+            fraction = 0.0
         else:
+            fraction = (target_distance - previous_distance) / span
+
+        resampled_points.append(
+            interpolate_point(points[previous_index], points[next_index], fraction)
+        )
+        resampled_distances.append(target_distance)
+
+    return resampled_points, resampled_distances
+
+
+def moving_average(values: Sequence[float], window_size: int) -> list[float]:
+    if not values:
+        return []
+    if window_size <= 1:
+        return list(values)
+
+    radius = window_size // 2
+    smoothed: list[float] = []
+    for index in range(len(values)):
+        start = max(0, index - radius)
+        end = min(len(values), index + radius + 1)
+        smoothed.append(sum(values[start:end]) / (end - start))
+    return smoothed
+
+
+def suppress_outliers(values: Sequence[float], max_change_m: float) -> list[float]:
+    if not values:
+        return []
+    cleaned = list(values)
+    for index in range(1, len(cleaned)):
+        change = abs(cleaned[index] - cleaned[index - 1])
+        if change <= max_change_m:
             continue
-        break
+        if index < len(cleaned) - 1:
+            cleaned[index] = (cleaned[index - 1] + cleaned[index + 1]) / 2
+        else:
+            cleaned[index] = cleaned[index - 1]
+    return cleaned
+
+
+def calculate_total_climb(
+    elevations_m: Sequence[float],
+    threshold_m: float,
+) -> tuple[float, float, float]:
+    if len(elevations_m) < 2:
+        return 0.0, 0.0, 0.0
+
+    total_ascent_m = 0.0
+    total_descent_m = 0.0
+
+    for previous, current in zip(elevations_m, elevations_m[1:]):
+        change = current - previous
+        if change > threshold_m:
+            total_ascent_m += change
+        elif change < -threshold_m:
+            total_descent_m += -change
+
+    net_difference_m = elevations_m[-1] - elevations_m[0]
+    return total_ascent_m, total_descent_m, net_difference_m
+
+
+def extract_embedded_elevations(points: Sequence[TrackPoint]) -> list[float]:
+    elevations = [point.elevation_m for point in points]
+    if any(elevation is None for elevation in elevations):
+        raise ValueError("The GPX file does not contain elevation data for all track points.")
+    return [float(elevation) for elevation in elevations if elevation is not None]
+
+
+def lookup_official_elevations(
+    points: Sequence[TrackPoint],
+    dataset: str,
+    cache_db: Path,
+    base_url: str,
+    interpolation: str,
+    timeout_seconds: float,
+) -> tuple[list[float], str, str]:
+    with ElevationCache(cache_db) as cache:
+        client = OpenTopoDataClient(
+            dataset=dataset,
+            base_url=base_url,
+            interpolation=interpolation,
+            timeout_seconds=timeout_seconds,
+            cache=cache,
+        )
+        elevations = client.lookup(points)
+
+    resolved = []
+    for point, elevation in zip(points, elevations):
+        if elevation is None:
+            if point.elevation_m is None:
+                raise ElevationServiceError(
+                    "Elevation service returned gaps and the GPX file cannot fill them."
+                )
+            resolved.append(point.elevation_m)
+        else:
+            resolved.append(float(elevation))
+
+    label = "official-dem" if all(value is not None for value in elevations) else "official-dem+gpx-fallback"
+    return resolved, label, dataset
+
+
+def analyze_track(
+    points: Sequence[TrackPoint],
+    elevation_source: str,
+    resample_distance_m: float,
+    threshold_m: float,
+    window_size: int,
+    max_change_m: float,
+    dataset: str,
+    cache_db: Path,
+    base_url: str,
+    interpolation: str,
+    timeout_seconds: float,
+) -> AnalysisResult:
+    raw_distances_m = cumulative_distances(points)
+    raw_elevations_m = extract_embedded_elevations(points)
+    average_point_spacing_m = (
+        raw_distances_m[-1] / max(1, len(points) - 1)
+        if len(points) > 1
+        else 0.0
+    )
+
+    if elevation_source == "gpx":
+        effective_spacing_m = max(resample_distance_m, average_point_spacing_m)
+        resampled_points, analysis_distances_m = resample_track(points, effective_spacing_m)
+        analysis_elevations_m = extract_embedded_elevations(resampled_points)
+        source_label = "gpx-embedded"
+        dataset_label = None
+    else:
+        resampled_points, analysis_distances_m = resample_track(points, resample_distance_m)
+        try:
+            analysis_elevations_m, source_label, dataset_label = lookup_official_elevations(
+                points=resampled_points,
+                dataset=dataset,
+                cache_db=cache_db,
+                base_url=base_url,
+                interpolation=interpolation,
+                timeout_seconds=timeout_seconds,
+            )
+        except ElevationServiceError:
+            if elevation_source != "auto":
+                raise
+            warning_message = (
+                "Official DEM lookup failed; falling back to GPX elevations. "
+                "Use --elevation-source gpx to suppress this warning."
+            )
+            warnings.warn(warning_message, RuntimeWarning)
+            effective_spacing_m = max(resample_distance_m, average_point_spacing_m)
+            resampled_points, analysis_distances_m = resample_track(points, effective_spacing_m)
+            analysis_elevations_m = extract_embedded_elevations(resampled_points)
+            source_label = "gpx-fallback"
+            dataset_label = None
+
+    cleaned_elevations_m = suppress_outliers(analysis_elevations_m, max_change_m=max_change_m)
+    smoothed_elevations_m = moving_average(cleaned_elevations_m, window_size=window_size)
+    total_ascent_m, total_descent_m, net_difference_m = calculate_total_climb(
+        smoothed_elevations_m,
+        threshold_m=threshold_m,
+    )
+
+    total_distance_m = raw_distances_m[-1]
+    return AnalysisResult(
+        source_label=source_label,
+        dataset_label=dataset_label,
+        total_distance_m=total_distance_m,
+        total_ascent_m=total_ascent_m,
+        total_descent_m=total_descent_m,
+        net_difference_m=net_difference_m,
+        average_point_spacing_m=average_point_spacing_m,
+        raw_point_count=len(points),
+        analysis_point_count=len(resampled_points),
+        raw_distances_m=raw_distances_m,
+        raw_elevations_m=raw_elevations_m,
+        analysis_distances_m=analysis_distances_m,
+        analysis_elevations_m=smoothed_elevations_m,
+    )
+
+
+def detect_circles(
+    waypoints: Sequence[TrackPoint],
+    threshold_km: float = 0.005,
+    min_distance_m: float = 3.0,
+) -> list[tuple[int, int]]:
+    visited_segments: set[int] = set()
+    circles: list[tuple[int, int]] = []
+    point_count = len(waypoints)
+
+    for start_index in range(point_count):
+        if start_index in visited_segments:
+            continue
+
+        for end_index in range(start_index + 1, point_count):
+            distance_km = haversine_distance_m(waypoints[start_index], waypoints[end_index]) / 1000.0
+            if distance_km >= threshold_km:
+                continue
+            if calculate_circle_distance(waypoints, start_index, end_index) < min_distance_m:
+                break
+            visited_segments.update(range(start_index, end_index + 1))
+            circles.append((start_index, end_index))
+            break
+
+        if circles:
+            break
 
     return circles
 
-def calculate_circle_distance(waypoints, start_idx, end_idx):
-    total_distance = 0.0
-    for i in range(start_idx, end_idx):
-        if i < len(waypoints) - 1:
-            total_distance += geodesic(waypoints[i], waypoints[i+1]).kilometers * 1000
-    return total_distance
 
-def calculate_average_distance(waypoints):
-    total_distance = 0.0
-    num_distances = len(waypoints) - 1
-    for i in range(len(waypoints) - 1):
-        total_distance += geodesic(waypoints[i], waypoints[i+1]).kilometers * 1000
-    return total_distance / num_distances if num_distances > 0 else 0
+def calculate_circle_distance(
+    waypoints: Sequence[TrackPoint],
+    start_index: int,
+    end_index: int,
+) -> float:
+    total_distance_m = 0.0
+    for index in range(start_index, end_index):
+        total_distance_m += haversine_distance_m(waypoints[index], waypoints[index + 1])
+    return total_distance_m
 
-def plot_elevation_profile(distances, elevations, smoothed_elevations, waypoints, circles, gesamtanstieg, gesamtabstieg, netto_hoehenunterschied, avg_distance, step):
-    total_ascent, total_descent, overall_difference, elevation_changes = calculate_elevation_changes(elevations, step)[:4]
 
-    sampled_distances = distances[::step]
-    sampled_elevations = smoothed_elevations[::step]
-    
-    slopes = [0.0]
-    for i in range(1, len(sampled_elevations)):
-        distance_change = sampled_distances[i] - sampled_distances[i-1]
-        elevation_change = sampled_elevations[i] - sampled_elevations[i-1]
-        if distance_change > 0:
-            slope_percentage = (elevation_change / distance_change) * 100
-        else:
-            slope_percentage = 0
-        slopes.append(slope_percentage)
-    
-    fig, ax1 = plt.subplots(figsize=(12, 6))
-    ax1.plot(distances, smoothed_elevations, label='Wachau Marathon Höhenprofil', color='blue')
-    ax1.set_xlabel('Distanz (m)')
-    ax1.set_ylabel('Höhe ü.n.N. (m)', color='blue')
-    ax1.tick_params(axis='y', labelcolor='black')
-    ax1.grid(True)
+def plot_elevation_profile(
+    result: AnalysisResult,
+    circles: Sequence[tuple[int, int]],
+    plot_title: str,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print(
+            "matplotlib is not installed, skipping the plot. Install requirements.txt to enable plotting.",
+            file=sys.stderr,
+        )
+        return
 
-    ax2 = ax1.twinx()
-    ax2.set_ylabel('Steigung (%)', color='c')
-    ax2.tick_params(axis='y', labelcolor='black')
-    ax2.plot(sampled_distances, slopes, label='', color='c', linestyle='-', linewidth=0.8)
+    figure, primary_axis = plt.subplots(figsize=(12, 6))
+    primary_axis.plot(
+        result.raw_distances_m,
+        result.raw_elevations_m,
+        label="GPX elevation",
+        color="lightgray",
+        linewidth=1.0,
+    )
+    primary_axis.plot(
+        result.analysis_distances_m,
+        result.analysis_elevations_m,
+        label="Analyzed elevation",
+        color="blue",
+        linewidth=1.4,
+    )
+    primary_axis.set_xlabel("Distanz (m)")
+    primary_axis.set_ylabel("Hoehe (m)")
+    primary_axis.grid(True)
 
-    km_ticks = [i for i in range(0, int(distances[-1]) + 1000, 5000)]
-    ax1.set_xticks(km_ticks)
-    ax1.set_xticklabels([f'{int(tick / 1000)}' for tick in km_ticks])
+    slopes_percent = [0.0]
+    for previous_distance, current_distance, previous_ele, current_ele in zip(
+        result.analysis_distances_m,
+        result.analysis_distances_m[1:],
+        result.analysis_elevations_m,
+        result.analysis_elevations_m[1:],
+    ):
+        delta_distance = current_distance - previous_distance
+        delta_elevation = current_ele - previous_ele
+        slopes_percent.append((delta_elevation / delta_distance) * 100 if delta_distance else 0.0)
 
-    x_center = (distances[0] + distances[-1]) / 2
-    y_bottom = min(smoothed_elevations) + 6
-
-    textstr = '\n'.join((
-        f'Messpunkt: {int(step)}',
-        f'Gesamtanstieg: {int(gesamtanstieg)} m',
-        f'Gesamtabstieg: {int(gesamtabstieg)} m',
-        f'Netto Höhenunterschied: {int(netto_hoehenunterschied)} m',
-        f'Durchschnittliche Distanz: {int(avg_distance)} m'))
-
-    props = dict(boxstyle='round', facecolor='wheat', alpha=0.9)
-    ax1.text(x_center, y_bottom, textstr, transform=ax1.transData, fontsize=8,
-             verticalalignment='bottom', horizontalalignment='center', bbox=props)
-
-    for idx, (start, end) in enumerate(circles):
-        ax1.axvline(x=distances[start], color='magenta', linestyle='--', label=f'Start BC{idx+1}' if idx == 0 else "")
-        ax1.axvline(x=distances[end], color='magenta', linestyle='--', label=f'End EC{idx+1}' if idx == 0 else "")
-        ax1.annotate(f'BC{idx+1}', (distances[start], min(smoothed_elevations) - 0.05), textcoords="offset points", xytext=(2,-10), ha='left', color='magenta')
-        ax1.annotate(f'EC{idx+1}', (distances[end], min(smoothed_elevations) - 0.05), textcoords="offset points", xytext=(2,-10), ha='left', color='magenta')
-
-    plt.title('Wachau Marathon Höhenprofil laut GPX Datei')
-    plt.show()
-
-def main():
-    # Set up argument parser for command-line input
-    parser = argparse.ArgumentParser(description="Analyze elevation gain from a GPX track.")
-    parser.add_argument('--gpx-file', type=str, default=os.path.join('..', 'RawMaterial', 'WACHAUmarathon_Marathon.gpx'),
-                        help='Path to the GPX file (default: ../RawMaterial/WACHAUmarathon_Marathon.gpx)')
-    parser.add_argument('--sampling-step', type=int, default=5,
-                        help='Sampling step for elevation changes (default: 5)')
-    parser.add_argument('--threshold', type=float, default=1.0,
-                        help='Minimum elevation change to count (meters, default: 1.0)')
-    parser.add_argument('--window-size', type=int, default=5,
-                        help='Smoothing window size (default: 5)')
-    parser.add_argument('--max-change', type=float, default=50.0,
-                        help='Maximum plausible elevation change between points (meters, default: 50.0)')
-
-    args = parser.parse_args()
-
-    # Use relative path for the GPX file
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    gpx_file_path = os.path.join(script_dir, args.gpx_file)
-
-    # Check if the GPX file exists
-    if not os.path.exists(gpx_file_path):
-        raise FileNotFoundError(f"GPX file not found at: {gpx_file_path}")
-
-    # Parse the GPX file
-    waypoints, elevations = parse_gpx(gpx_file_path)
-
-    # Calculate elevation changes
-    gesamtanstieg, gesamtabstieg, netto_hoehenunterschied, elevation_changes, smoothed_elevations = calculate_elevation_changes(
-        elevations,
-        step=args.sampling_step,
-        threshold=args.threshold,
-        window_size=args.window_size,
-        max_change=args.max_change
+    secondary_axis = primary_axis.twinx()
+    secondary_axis.set_ylabel("Steigung (%)")
+    secondary_axis.plot(
+        result.analysis_distances_m,
+        slopes_percent,
+        color="teal",
+        linewidth=0.8,
+        alpha=0.7,
     )
 
-    distances = calculate_distances(waypoints)
-    circles = detect_circles(waypoints, threshold=0.005, min_distance=3)
-    average_distance = calculate_average_distance(waypoints)
+    total_distance_m = result.raw_distances_m[-1]
+    kilometer_ticks = [tick for tick in range(0, int(total_distance_m) + 1000, 5000)]
+    primary_axis.set_xticks(kilometer_ticks)
+    primary_axis.set_xticklabels([str(int(tick / 1000)) for tick in kilometer_ticks])
 
-    # Print results
-    print(f"Gesamtanstieg: {gesamtanstieg} m")
-    print(f"Gesamtabstieg: {gesamtabstieg} m")
-    print(f"Netto Höhenunterschied: {netto_hoehenunterschied} m")
-    print(f"Durchschnittliche Distanz zwischen Punkten: {average_distance:.2f} m")
+    info = "\n".join(
+        [
+            f"Quelle: {result.source_label}",
+            f"Datensatz: {result.dataset_label or '-'}",
+            f"Gesamtanstieg: {int(round(result.total_ascent_m))} m",
+            f"Gesamtabstieg: {int(round(result.total_descent_m))} m",
+            f"Netto-Hoehenunterschied: {int(round(result.net_difference_m))} m",
+            f"Analysepunkte: {result.analysis_point_count}",
+        ]
+    )
+    primary_axis.text(
+        total_distance_m / 2,
+        min(result.analysis_elevations_m) + 6,
+        info,
+        fontsize=8,
+        verticalalignment="bottom",
+        horizontalalignment="center",
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.9},
+    )
+
+    for index, (start, end) in enumerate(circles, start=1):
+        primary_axis.axvline(
+            x=result.raw_distances_m[start],
+            color="magenta",
+            linestyle="--",
+            label=f"Circle start {index}" if index == 1 else "",
+        )
+        primary_axis.axvline(
+            x=result.raw_distances_m[end],
+            color="magenta",
+            linestyle="--",
+            label=f"Circle end {index}" if index == 1 else "",
+        )
+
+    primary_axis.legend(loc="upper right")
+    plt.title(plot_title)
+    plt.tight_layout()
+    plt.show()
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Analyze total ascent/descent from a GPX track. "
+            "By default the script tries to replace noisy GPX elevations with an official DEM lookup."
+        )
+    )
+    parser.add_argument(
+        "--gpx-file",
+        type=Path,
+        default=DEFAULT_GPX_FILE,
+        help=f"Path to the GPX file (default: {DEFAULT_GPX_FILE}).",
+    )
+    parser.add_argument(
+        "--elevation-source",
+        choices=["auto", "gpx", "opentopodata"],
+        default="auto",
+        help="Elevation source: auto (DEM with GPX fallback), gpx, or opentopodata only.",
+    )
+    parser.add_argument(
+        "--resample-distance",
+        type=float,
+        default=25.0,
+        help="Horizontal spacing in meters for the analysis profile (default: 25.0).",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=1.0,
+        help="Minimum elevation change per analysis step that counts toward ascent/descent.",
+    )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=5,
+        help="Smoothing window size applied after elevation lookup (default: 5).",
+    )
+    parser.add_argument(
+        "--max-change",
+        type=float,
+        default=50.0,
+        help="Maximum plausible point-to-point elevation jump before outlier suppression.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=DEFAULT_DATASET,
+        help=(
+            "OpenTopoData dataset or comma-separated dataset stack "
+            f"(default: {DEFAULT_DATASET})."
+        ),
+    )
+    parser.add_argument(
+        "--cache-db",
+        type=Path,
+        default=DEFAULT_CACHE_DB,
+        help=f"SQLite cache file for DEM lookups (default: {DEFAULT_CACHE_DB}).",
+    )
+    parser.add_argument(
+        "--opentopodata-base-url",
+        type=str,
+        default="https://api.opentopodata.org/v1",
+        help="Base URL for the OpenTopoData API.",
+    )
+    parser.add_argument(
+        "--interpolation",
+        choices=["nearest", "bilinear", "cubic"],
+        default="bilinear",
+        help="Interpolation mode for DEM lookups.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=15.0,
+        help="Network timeout for external DEM lookups.",
+    )
+    parser.add_argument(
+        "--plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show the elevation plot when matplotlib is available.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_arguments()
+    gpx_file = args.gpx_file
+    if not gpx_file.is_absolute():
+        gpx_file = (SCRIPT_PATH.parent / gpx_file).resolve()
+
+    if not gpx_file.exists():
+        raise FileNotFoundError(f"GPX file not found at: {gpx_file}")
+
+    track_points = parse_gpx(gpx_file)
+    analysis = analyze_track(
+        points=track_points,
+        elevation_source=args.elevation_source,
+        resample_distance_m=args.resample_distance,
+        threshold_m=args.threshold,
+        window_size=args.window_size,
+        max_change_m=args.max_change,
+        dataset=args.dataset,
+        cache_db=args.cache_db,
+        base_url=args.opentopodata_base_url,
+        interpolation=args.interpolation,
+        timeout_seconds=args.timeout_seconds,
+    )
+    circles = detect_circles(track_points, threshold_km=0.005, min_distance_m=3.0)
+
+    print(f"Gesamtanstieg: {analysis.total_ascent_m:.2f} m")
+    print(f"Gesamtabstieg: {analysis.total_descent_m:.2f} m")
+    print(f"Netto Hoehenunterschied: {analysis.net_difference_m:.2f} m")
+    print(f"Track-Laenge: {analysis.total_distance_m / 1000:.2f} km")
+    print(f"Durchschnittliche Distanz zwischen Rohpunkten: {analysis.average_point_spacing_m:.2f} m")
+    print(f"Verwendete Hoehenquelle: {analysis.source_label}")
+    if analysis.dataset_label is not None:
+        print(f"DEM-Datensatz: {analysis.dataset_label}")
+    print(f"Rohpunkte: {analysis.raw_point_count}")
+    print(f"Analysepunkte: {analysis.analysis_point_count}")
     print(f"Detected circles: {circles}")
 
-    # Plot the elevation profile
-    plot_elevation_profile(distances, elevations, smoothed_elevations, waypoints, circles, gesamtanstieg, gesamtabstieg, netto_hoehenunterschied, average_distance, args.sampling_step)
+    if args.plot:
+        plot_elevation_profile(
+            analysis,
+            circles,
+            plot_title=f"Hoehenprofil laut {gpx_file.name}",
+        )
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
