@@ -18,7 +18,7 @@ import zlib
 from pathlib import Path
 from typing import Sequence
 
-from .Track_analysis_05 import ElevationServiceError, TrackPoint
+from .track_types import ElevationServiceError, TrackPoint
 
 
 TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{x}/{y}.png"

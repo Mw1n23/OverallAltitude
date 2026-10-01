@@ -6,6 +6,10 @@
 - Added an elevation backend for the open AWS Terrain Tiles (lidar terrain models in Austria, England and the USA).
 - Added bridge and tunnel correction based on OpenStreetMap ways and surveyed deck elevations for the New York City bridges.
 - Ascent/descent in the race comparison is summed between significant reversals (hysteresis), so gentle climbs count in full.
+- Changed `overall-altitude`: `--elevation-source auto` now reads the AWS Terrain Tiles instead of OpenTopoData (`terrain-tiles` is available as a strict mode, `opentopodata` is unchanged).
+- Changed `overall-altitude`: ascent/descent is summed between significant reversals. `--threshold` is the minimum reversal and defaults to 2 m (before: per-step threshold of 1 m, which ignored gentle climbs).
+- Added `--course-id` to `overall-altitude` to correct the bridge and tunnel sections of a listed course.
+- `Track_analysis_05.py` now imports sibling modules; run it through `overall-altitude` or `python -m OverallAltitude`, not as a standalone script.
 
 ## 0.1.0
 - Reworked the GPX analysis into an installable Python package.

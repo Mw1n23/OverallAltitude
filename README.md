@@ -10,9 +10,10 @@ The main script now:
 
 - reads the GPX track,
 - resamples it to a fixed horizontal spacing,
-- optionally replaces noisy GPX altitudes with DEM-based elevations from OpenTopoData,
-- caches external elevation lookups in SQLite,
-- smooths the resulting profile before computing total climb.
+- replaces noisy GPX altitudes with terrain model elevations (open AWS Terrain Tiles by default, OpenTopoData as an alternative),
+- caches external elevation lookups,
+- optionally corrects sections on bridges and in tunnels,
+- smooths the resulting profile and sums ascent and descent between significant reversals.
 
 This avoids the classic problem where summing every GPS altitude jump produces an implausibly large overall ascent.
 
@@ -24,6 +25,8 @@ Technical background and method notes are documented in `docs/ELEVATION_METHOD_A
 - `OverallAltitude/Code/race_comparison.py`: comparison of several race courses (see below).
 - `OverallAltitude/Code/race_figure.py`: comparison figure.
 - `OverallAltitude/Code/terrain_tiles.py`: elevation lookup from the open AWS Terrain Tiles.
+- `OverallAltitude/Code/structure_correction.py`: bridge and tunnel correction of terrain elevations.
+- `OverallAltitude/Code/track_types.py`: types shared by the modules.
 - `OverallAltitude/Code/course_structures.py`: helper that lists bridge and tunnel sections of a course.
 - `OverallAltitude/Code/fetch_race_tracks.py`: downloads the course tracks from their sources.
 - `OverallAltitude/RawMaterial/`: sample GPX files.
@@ -73,10 +76,16 @@ Module entry point:
 python -m OverallAltitude --help
 ```
 
-Default analysis run:
+Default analysis run (Wachau marathon sample):
 
 ```bash
 overall-altitude
+```
+
+The same run with the bridge and tunnel sections of the course corrected (the terrain model climbs over the Dürnstein tunnel, the course does not):
+
+```bash
+overall-altitude --course-id wachau_marathon
 ```
 
 Explicit GPX input:
@@ -91,17 +100,25 @@ Force offline mode and use the embedded GPX elevations only:
 overall-altitude --elevation-source gpx
 ```
 
-Use the official DEM lookup only:
+Use the terrain tiles only (no GPX fallback):
 
 ```bash
-overall-altitude --elevation-source opentopodata
+overall-altitude --elevation-source terrain-tiles
+```
+
+Use an OpenTopoData dataset instead, for example the 200 m terrain model for Germany:
+
+```bash
+overall-altitude --elevation-source opentopodata --dataset bkg200m
 ```
 
 Important options:
 
 - `--resample-distance 25`: horizontal spacing in meters for the analysis profile.
-- `--dataset eudem25m,mapzen`: DEM dataset stack used for the lookup.
-- `--cache-db ~/.cache/overall-altitude/elevation_cache.sqlite3`: SQLite cache for repeated runs.
+- `--threshold 2`: minimum reversal in meters that separates a climb from a descent.
+- `--dataset eudem25m,mapzen`: DEM dataset stack used with `--elevation-source opentopodata`.
+- `--course-id <id>`: correct the bridge and tunnel sections listed for this course in `OverallAltitude/RawMaterial/races/structures.json`.
+- `--cache-db ~/.cache/overall-altitude/elevation_cache.sqlite3`: SQLite cache for repeated runs; terrain tiles are cached in the folder next to it.
 - `--plot / --no-plot`: enable or disable plotting.
 
 ## Race comparison

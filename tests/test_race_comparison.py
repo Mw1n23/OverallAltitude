@@ -8,7 +8,14 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from OverallAltitude.Code import course_structures, fetch_race_tracks, race_comparison, terrain_tiles
+from OverallAltitude.Code import (
+    Track_analysis_05 as track_analysis,
+    course_structures,
+    fetch_race_tracks,
+    race_comparison,
+    structure_correction,
+    terrain_tiles,
+)
 from OverallAltitude.Code.Track_analysis_05 import TrackPoint, cumulative_distances
 
 
@@ -59,7 +66,7 @@ class ClimbStatisticsTests(unittest.TestCase):
     def test_gentle_climb_counts_in_full(self) -> None:
         elevations = [100.0 + 0.5 * index for index in range(41)]
 
-        ascent, descent, cumulative = race_comparison.climb_statistics(elevations, threshold_m=2.0)
+        ascent, descent, cumulative = track_analysis.climb_statistics(elevations, threshold_m=2.0)
 
         self.assertAlmostEqual(ascent, 20.0)
         self.assertAlmostEqual(descent, 0.0)
@@ -68,7 +75,7 @@ class ClimbStatisticsTests(unittest.TestCase):
     def test_noise_below_threshold_adds_nothing(self) -> None:
         elevations = [100.0, 101.0, 100.0, 101.5, 100.2, 101.0, 100.0]
 
-        ascent, descent, _ = race_comparison.climb_statistics(elevations, threshold_m=2.0)
+        ascent, descent, _ = track_analysis.climb_statistics(elevations, threshold_m=2.0)
 
         self.assertAlmostEqual(ascent, 0.0)
         self.assertAlmostEqual(descent, 0.0)
@@ -76,7 +83,7 @@ class ClimbStatisticsTests(unittest.TestCase):
     def test_ascent_minus_descent_equals_net_difference(self) -> None:
         elevations = [100.0, 104.0, 103.0, 110.0, 95.0, 96.0, 99.5, 98.0, 107.0, 106.5]
 
-        ascent, descent, cumulative = race_comparison.climb_statistics(elevations, threshold_m=2.0)
+        ascent, descent, cumulative = track_analysis.climb_statistics(elevations, threshold_m=2.0)
 
         self.assertAlmostEqual(ascent - descent, elevations[-1] - elevations[0])
         self.assertAlmostEqual(cumulative[-1], ascent)
@@ -85,7 +92,7 @@ class ClimbStatisticsTests(unittest.TestCase):
     def test_significant_extremes_skip_small_reversals(self) -> None:
         elevations = [100.0, 105.0, 104.0, 110.0, 100.0, 101.0, 100.0]
 
-        nodes = race_comparison.significant_extremes(elevations, threshold_m=2.0)
+        nodes = track_analysis.significant_extremes(elevations, threshold_m=2.0)
 
         self.assertEqual(nodes, [0, 3, 4, 6])
 
@@ -96,8 +103,8 @@ class StructureCorrectionTests(unittest.TestCase):
         self.distances_m = cumulative_distances(self.points)
         self.span_km = (self.distances_m[2] / 1000.0, self.distances_m[6] / 1000.0)
 
-    def span(self, kind: str, **extra) -> race_comparison.StructureSpan:
-        return race_comparison.StructureSpan(
+    def span(self, kind: str, **extra) -> structure_correction.StructureSpan:
+        return structure_correction.StructureSpan(
             kind=kind,
             start_km=self.span_km[0],
             end_km=self.span_km[1],
@@ -109,7 +116,7 @@ class StructureCorrectionTests(unittest.TestCase):
     def test_bridge_spans_the_valley(self) -> None:
         terrain = [50.0, 50.0, 40.0, 10.0, 0.0, 10.0, 42.0, 52.0, 52.0]
 
-        corrected = race_comparison.apply_structures(
+        corrected = structure_correction.apply_structures(
             self.points, self.distances_m, terrain, [self.span("bridge")], {}
         )
 
@@ -121,7 +128,7 @@ class StructureCorrectionTests(unittest.TestCase):
     def test_tunnel_cuts_through_the_hill(self) -> None:
         terrain = [50.0, 50.0, 60.0, 80.0, 90.0, 80.0, 60.0, 50.0, 50.0]
 
-        corrected = race_comparison.apply_structures(
+        corrected = structure_correction.apply_structures(
             self.points, self.distances_m, terrain, [self.span("tunnel")], {}
         )
 
@@ -130,7 +137,7 @@ class StructureCorrectionTests(unittest.TestCase):
     def test_wrongly_flagged_bridge_keeps_the_hill(self) -> None:
         terrain = [50.0, 50.0, 60.0, 80.0, 90.0, 80.0, 60.0, 50.0, 50.0]
 
-        corrected = race_comparison.apply_structures(
+        corrected = structure_correction.apply_structures(
             self.points, self.distances_m, terrain, [self.span("bridge")], {}
         )
 
@@ -146,7 +153,7 @@ class StructureCorrectionTests(unittest.TestCase):
             + [(0.0, self.points[4].longitude, 60.0)]
         }
 
-        corrected = race_comparison.apply_structures(
+        corrected = structure_correction.apply_structures(
             self.points,
             self.distances_m,
             terrain,
@@ -157,16 +164,16 @@ class StructureCorrectionTests(unittest.TestCase):
         self.assertEqual(corrected, [20.0, 20.0, 30.0, 40.0, 40.0, 40.0, 30.0, 20.0, 20.0])
 
     def test_span_outside_the_track_is_rejected(self) -> None:
-        span = race_comparison.StructureSpan("bridge", 5.0, 6.0, "far away", None, None)
+        span = structure_correction.StructureSpan("bridge", 5.0, 6.0, "far away", None, None)
 
         with self.assertRaises(ValueError):
-            race_comparison.apply_structures(self.points, self.distances_m, [0.0] * 9, [span], {})
+            structure_correction.apply_structures(self.points, self.distances_m, [0.0] * 9, [span], {})
 
 
 class TrackHelperTests(unittest.TestCase):
     def test_fill_gaps_linear(self) -> None:
         self.assertEqual(
-            race_comparison.fill_gaps_linear([None, 10.0, None, None, 16.0, None]),
+            structure_correction.fill_gaps_linear([None, 10.0, None, None, 16.0, None]),
             [10.0, 10.0, 12.0, 14.0, 16.0, 16.0],
         )
 
@@ -235,8 +242,8 @@ class TrackHelperTests(unittest.TestCase):
 class RaceDataTests(unittest.TestCase):
     def test_manifest_structures_and_deck_points_are_consistent(self) -> None:
         specs = race_comparison.load_manifest(race_comparison.DEFAULT_MANIFEST)
-        structures = race_comparison.load_structures(race_comparison.DEFAULT_STRUCTURES)
-        deck_points = race_comparison.load_deck_points(race_comparison.DEFAULT_DECK_POINTS)
+        structures = structure_correction.load_structures(structure_correction.DEFAULT_STRUCTURES)
+        deck_points = structure_correction.load_deck_points(structure_correction.DEFAULT_DECK_POINTS)
 
         course_ids = {spec.course_id for spec in specs}
         self.assertIn("wachau_marathon", course_ids)
@@ -416,7 +423,7 @@ class FigureTests(unittest.TestCase):
             length_km = 42.195 if spec.discipline != "triathlon_bike" else 180.0
             distances = [length_km * step / 200 for step in range(201)]
             elevations = [100.0 + (index + 1) * 5.0 * abs((step % 40) - 20) / 20 for step in range(201)]
-            ascent, descent, cumulative = race_comparison.climb_statistics(elevations, 2.0)
+            ascent, descent, cumulative = track_analysis.climb_statistics(elevations, 2.0)
             profiles.append(
                 race_comparison.CourseProfile(
                     spec=spec,

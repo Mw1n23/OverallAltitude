@@ -68,7 +68,7 @@ All inputs live in `OverallAltitude/RawMaterial/races/`:
    the course follows the straight line between the two ends: a bridge is never below the
    terrain, a tunnel never above it. The five river bridges of the New York City Marathon
    are long and arched, so their deck profile comes from surveyed spot elevations.
-4. **Smoothing.** Moving average over five points (125 m), as in the single-track analysis.
+4. **Smoothing.** Moving average over five points (125 m).
 5. **Ascent and descent.** Significant reversals of at least 2 m split the profile into
    climbs and descents; the heights of these legs are summed. Noise below 2 m adds nothing,
    and a long gentle climb counts in full. Ascent minus descent equals the net difference
@@ -76,12 +76,13 @@ All inputs live in `OverallAltitude/RawMaterial/races/`:
 6. **Distance.** Run courses are scaled to 42.195 km, because a digitised track is up to
    1.3 % longer or shorter than the measured course. Bike courses keep their track length.
 
-The smoothing window and the threshold are the same for all courses.
+The smoothing window and the threshold are the same for all courses and equal the defaults
+of the single-track analysis. `overall-altitude --gpx-file <file> --course-id <id>` therefore
+reproduces the totals of a single-lap course that uses the terrain tiles.
 
 ## Why not the default OpenTopoData datasets
 
-The default stack `eudem25m,mapzen` of the single-track analysis is too noisy for flat city
-courses. EU-DEM and the `mapzen` dataset are surface models with 25–30 m cells; buildings,
+The OpenTopoData stack `eudem25m,mapzen` is too noisy for flat city courses. EU-DEM and the `mapzen` dataset are surface models with 25–30 m cells; buildings,
 river banks and railway cuttings next to the road add several metres of noise. For the
 Wachau marathon the sum ranged from 150 m to 390 m depending on the smoothing. The lidar
 terrain models give a stable result, and with them the method reproduces published values

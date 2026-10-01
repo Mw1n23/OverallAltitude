@@ -16,11 +16,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from .structure_correction import (
+    DEFAULT_DECK_POINTS,
+    DEFAULT_STRUCTURES,
+    DeckPointSets,
+    StructureSpan,
+    apply_structures,
+    load_deck_points,
+    load_structures,
+)
+from .terrain_tiles import TerrainTileClient
+from .track_types import ElevationServiceError, TrackPoint
+
 
 GPX_NAMESPACE = {"default": "http://www.topografix.com/GPX/1/1"}
 SCRIPT_PATH = Path(__file__).resolve()
 DEFAULT_GPX_FILE = SCRIPT_PATH.parent.parent / "RawMaterial" / "WACHAUmarathon_Marathon.gpx"
 DEFAULT_DATASET = "eudem25m,mapzen"
+DEFAULT_RESAMPLE_DISTANCE_M = 25.0
+DEFAULT_WINDOW_SIZE = 5
+DEFAULT_THRESHOLD_M = 2.0
+DEFAULT_MAX_CHANGE_M = 50.0
+TERRAIN_TILES_SOURCE = "terrain-tiles"
+TERRAIN_TILE_CACHE_DIRNAME = "terrain-tiles"
 
 
 def default_cache_db() -> Path:
@@ -30,13 +48,6 @@ def default_cache_db() -> Path:
 
 
 DEFAULT_CACHE_DB = default_cache_db()
-
-
-@dataclass(frozen=True)
-class TrackPoint:
-    latitude: float
-    longitude: float
-    elevation_m: float | None
 
 
 @dataclass(frozen=True)
@@ -54,10 +65,6 @@ class AnalysisResult:
     raw_elevations_m: list[float]
     analysis_distances_m: list[float]
     analysis_elevations_m: list[float]
-
-
-class ElevationServiceError(RuntimeError):
-    """Raised when the external elevation source cannot satisfy a request."""
 
 
 class BatchRequestTooLargeError(ElevationServiceError):
@@ -419,6 +426,68 @@ def suppress_outliers(values: Sequence[float], max_change_m: float) -> list[floa
     return cleaned
 
 
+def significant_extremes(elevations_m: Sequence[float], threshold_m: float) -> list[int]:
+    """Indices of the first point, every reversal of at least ``threshold_m`` and the last point."""
+    if len(elevations_m) < 2:
+        return list(range(len(elevations_m)))
+
+    nodes = [0]
+    candidate = 0
+    direction = 0
+    for index in range(1, len(elevations_m)):
+        elevation = elevations_m[index]
+        if direction == 0:
+            if abs(elevation - elevations_m[0]) >= threshold_m:
+                direction = 1 if elevation > elevations_m[0] else -1
+                candidate = index
+            continue
+        if direction * (elevation - elevations_m[candidate]) > 0:
+            candidate = index
+        elif direction * (elevations_m[candidate] - elevation) >= threshold_m:
+            nodes.append(candidate)
+            direction = -direction
+            candidate = index
+
+    last_index = len(elevations_m) - 1
+    if candidate not in (nodes[-1], last_index):
+        nodes.append(candidate)
+    if nodes[-1] != last_index:
+        nodes.append(last_index)
+    return nodes
+
+
+def climb_statistics(
+    elevations_m: Sequence[float],
+    threshold_m: float,
+) -> tuple[float, float, list[float]]:
+    """Total ascent, total descent and the cumulative ascent at every point.
+
+    Only legs between significant reversals count, so noise below the threshold adds
+    nothing, while a long gentle climb counts in full. Ascent minus descent equals the
+    net elevation difference of the track.
+    """
+    if not elevations_m:
+        return 0.0, 0.0, []
+
+    nodes = significant_extremes(elevations_m, threshold_m)
+    total_ascent_m = 0.0
+    total_descent_m = 0.0
+    cumulative = [0.0] * len(elevations_m)
+    for start, end in zip(nodes, nodes[1:]):
+        leg_height = elevations_m[end] - elevations_m[start]
+        if leg_height > 0:
+            highest = elevations_m[start]
+            for index in range(start + 1, end + 1):
+                highest = max(highest, elevations_m[index])
+                cumulative[index] = total_ascent_m + min(highest - elevations_m[start], leg_height)
+            total_ascent_m += leg_height
+        else:
+            for index in range(start + 1, end + 1):
+                cumulative[index] = total_ascent_m
+            total_descent_m += -leg_height
+    return total_ascent_m, total_descent_m, cumulative
+
+
 def calculate_total_climb(
     elevations_m: Sequence[float],
     threshold_m: float,
@@ -426,16 +495,7 @@ def calculate_total_climb(
     if len(elevations_m) < 2:
         return 0.0, 0.0, 0.0
 
-    total_ascent_m = 0.0
-    total_descent_m = 0.0
-
-    for previous, current in zip(elevations_m, elevations_m[1:]):
-        change = current - previous
-        if change > threshold_m:
-            total_ascent_m += change
-        elif change < -threshold_m:
-            total_descent_m += -change
-
+    total_ascent_m, total_descent_m, _ = climb_statistics(elevations_m, threshold_m)
     net_difference_m = elevations_m[-1] - elevations_m[0]
     return total_ascent_m, total_descent_m, net_difference_m
 
@@ -480,6 +540,15 @@ def lookup_official_elevations(
     return resolved, label, dataset
 
 
+def lookup_terrain_tile_elevations(
+    points: Sequence[TrackPoint],
+    cache_dir: Path,
+    timeout_seconds: float,
+) -> list[float]:
+    client = TerrainTileClient(cache_dir, timeout_seconds=timeout_seconds)
+    return client.lookup(points)
+
+
 def analyze_track(
     points: Sequence[TrackPoint],
     elevation_source: str,
@@ -492,7 +561,12 @@ def analyze_track(
     base_url: str,
     interpolation: str,
     timeout_seconds: float,
+    structures: Sequence[StructureSpan] = (),
+    deck_point_sets: DeckPointSets | None = None,
 ) -> AnalysisResult:
+    if structures and elevation_source == "gpx":
+        raise ValueError("Bridge and tunnel sections can only correct terrain model elevations.")
+
     raw_distances_m = cumulative_distances(points)
     raw_elevations_m = extract_embedded_elevations(points)
     average_point_spacing_m = (
@@ -510,20 +584,30 @@ def analyze_track(
     else:
         resampled_points, analysis_distances_m = resample_track(points, resample_distance_m)
         try:
-            analysis_elevations_m, source_label, dataset_label = lookup_official_elevations(
-                points=resampled_points,
-                dataset=dataset,
-                cache_db=cache_db,
-                base_url=base_url,
-                interpolation=interpolation,
-                timeout_seconds=timeout_seconds,
-            )
+            if elevation_source == "opentopodata":
+                analysis_elevations_m, source_label, dataset_label = lookup_official_elevations(
+                    points=resampled_points,
+                    dataset=dataset,
+                    cache_db=cache_db,
+                    base_url=base_url,
+                    interpolation=interpolation,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                analysis_elevations_m = lookup_terrain_tile_elevations(
+                    resampled_points,
+                    cache_dir=cache_db.parent / TERRAIN_TILE_CACHE_DIRNAME,
+                    timeout_seconds=timeout_seconds,
+                )
+                source_label = TERRAIN_TILES_SOURCE
+                dataset_label = None
         except ElevationServiceError:
             if elevation_source != "auto":
                 raise
             warning_message = (
-                "Official DEM lookup failed; falling back to GPX elevations. "
-                "Use --elevation-source gpx to suppress this warning."
+                "Terrain tile lookup failed; falling back to GPX elevations"
+                + (" without bridge and tunnel correction. " if structures else ". ")
+                + "Use --elevation-source gpx to suppress this warning."
             )
             warnings.warn(warning_message, RuntimeWarning)
             effective_spacing_m = max(resample_distance_m, average_point_spacing_m)
@@ -531,6 +615,14 @@ def analyze_track(
             analysis_elevations_m = extract_embedded_elevations(resampled_points)
             source_label = "gpx-fallback"
             dataset_label = None
+        else:
+            analysis_elevations_m = apply_structures(
+                resampled_points,
+                analysis_distances_m,
+                analysis_elevations_m,
+                structures,
+                deck_point_sets or {},
+            )
 
     cleaned_elevations_m = suppress_outliers(analysis_elevations_m, max_change_m=max_change_m)
     smoothed_elevations_m = moving_average(cleaned_elevations_m, window_size=window_size)
@@ -700,7 +792,7 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Analyze total ascent/descent from a GPX track. "
-            "By default the script tries to replace noisy GPX elevations with an official DEM lookup."
+            "By default the script replaces noisy GPX elevations with terrain model elevations."
         )
     )
     parser.add_argument(
@@ -711,32 +803,41 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--elevation-source",
-        choices=["auto", "gpx", "opentopodata"],
+        choices=["auto", TERRAIN_TILES_SOURCE, "opentopodata", "gpx"],
         default="auto",
-        help="Elevation source: auto (DEM with GPX fallback), gpx, or opentopodata only.",
+        help=(
+            "Elevation source: auto (terrain tiles with GPX fallback), terrain-tiles, "
+            "opentopodata (dataset given by --dataset) or gpx."
+        ),
     )
     parser.add_argument(
         "--resample-distance",
         type=float,
-        default=25.0,
-        help="Horizontal spacing in meters for the analysis profile (default: 25.0).",
+        default=DEFAULT_RESAMPLE_DISTANCE_M,
+        help=(
+            "Horizontal spacing in meters for the analysis profile "
+            f"(default: {DEFAULT_RESAMPLE_DISTANCE_M})."
+        ),
     )
     parser.add_argument(
         "--threshold",
         type=float,
-        default=1.0,
-        help="Minimum elevation change per analysis step that counts toward ascent/descent.",
+        default=DEFAULT_THRESHOLD_M,
+        help=(
+            "Minimum reversal in meters that separates a climb from a descent "
+            f"(default: {DEFAULT_THRESHOLD_M})."
+        ),
     )
     parser.add_argument(
         "--window-size",
         type=int,
-        default=5,
-        help="Smoothing window size applied after elevation lookup (default: 5).",
+        default=DEFAULT_WINDOW_SIZE,
+        help=f"Smoothing window size applied after elevation lookup (default: {DEFAULT_WINDOW_SIZE}).",
     )
     parser.add_argument(
         "--max-change",
         type=float,
-        default=50.0,
+        default=DEFAULT_MAX_CHANGE_M,
         help="Maximum plausible point-to-point elevation jump before outlier suppression.",
     )
     parser.add_argument(
@@ -752,7 +853,10 @@ def parse_arguments() -> argparse.Namespace:
         "--cache-db",
         type=Path,
         default=DEFAULT_CACHE_DB,
-        help=f"SQLite cache file for DEM lookups (default: {DEFAULT_CACHE_DB}).",
+        help=(
+            f"SQLite cache file for DEM lookups (default: {DEFAULT_CACHE_DB}). "
+            "Terrain tiles are cached in the folder next to it."
+        ),
     )
     parser.add_argument(
         "--opentopodata-base-url",
@@ -773,12 +877,36 @@ def parse_arguments() -> argparse.Namespace:
         help="Network timeout for external DEM lookups.",
     )
     parser.add_argument(
+        "--course-id",
+        type=str,
+        default=None,
+        help=(
+            "Correct the bridge and tunnel sections listed for this course in the structures file "
+            "(for example wachau_marathon for the default GPX file)."
+        ),
+    )
+    parser.add_argument(
+        "--structures-file",
+        type=Path,
+        default=DEFAULT_STRUCTURES,
+        help=f"Bridge and tunnel sections per course (default: {DEFAULT_STRUCTURES}).",
+    )
+    parser.add_argument(
+        "--deck-points-file",
+        type=Path,
+        default=DEFAULT_DECK_POINTS,
+        help=f"Surveyed bridge deck elevations (default: {DEFAULT_DECK_POINTS}).",
+    )
+    parser.add_argument(
         "--plot",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Show the elevation plot when matplotlib is available.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.course_id is not None and args.elevation_source == "gpx":
+        parser.error("--course-id needs terrain model elevations; it cannot be combined with --elevation-source gpx.")
+    return args
 
 
 def main() -> int:
@@ -789,6 +917,18 @@ def main() -> int:
 
     if not gpx_file.exists():
         raise FileNotFoundError(f"GPX file not found at: {gpx_file}")
+
+    structures: list[StructureSpan] = []
+    deck_point_sets: DeckPointSets = {}
+    if args.course_id is not None:
+        structures_by_course = load_structures(args.structures_file)
+        if args.course_id not in structures_by_course:
+            raise ValueError(
+                f"Unknown course {args.course_id!r} in {args.structures_file}. "
+                f"Known courses: {sorted(structures_by_course)}."
+            )
+        structures = structures_by_course[args.course_id]
+        deck_point_sets = load_deck_points(args.deck_points_file)
 
     track_points = parse_gpx(gpx_file)
     analysis = analyze_track(
@@ -803,6 +943,8 @@ def main() -> int:
         base_url=args.opentopodata_base_url,
         interpolation=args.interpolation,
         timeout_seconds=args.timeout_seconds,
+        structures=structures,
+        deck_point_sets=deck_point_sets,
     )
     circles = detect_circles(track_points, threshold_km=0.005, min_distance_m=3.0)
 
@@ -814,6 +956,8 @@ def main() -> int:
     print(f"Verwendete Hoehenquelle: {analysis.source_label}")
     if analysis.dataset_label is not None:
         print(f"DEM-Datensatz: {analysis.dataset_label}")
+    if args.course_id is not None and analysis.source_label != "gpx-fallback":
+        print(f"Bruecken und Tunnel korrigiert: {len(structures)} Abschnitte ({args.course_id})")
     print(f"Rohpunkte: {analysis.raw_point_count}")
     print(f"Analysepunkte: {analysis.analysis_point_count}")
     print(f"Detected circles: {circles}")
