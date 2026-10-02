@@ -14,3 +14,11 @@ dist/
 
 *.png
 *.csv
+
+# Results of the race comparison are kept, other output files are not.
+Output/*
+!Output/race_comparison.png
+!Output/race_comparison.csv
+
+# Course tracks are third-party material; overall-altitude-fetch-tracks downloads them.
+OverallAltitude/RawMaterial/races/*.gpx

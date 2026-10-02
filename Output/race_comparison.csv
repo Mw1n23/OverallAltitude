@@ -1,0 +1,15 @@
+id,event,discipline,location,course_version,laps,distance_km,track_distance_km,total_ascent_m,total_descent_m,net_difference_m,min_elevation_m,max_elevation_m,elevation_source,track_source
+boston_marathon,Boston Marathon,marathon,"Boston, USA",2026,1,42.195,42.428,245,382,-137,2,140,opentopodata:ned10m,goandrace.com
+new_york_city_marathon,New York City Marathon,marathon,"New York, USA",2025,1,42.195,42.608,260,275,-16,2,79,opentopodata:ned10m,goandrace.com
+london_marathon,London Marathon,marathon,"London, Großbritannien",2025,1,42.195,42.291,94,128,-34,1,52,terrain-tiles,goandrace.com
+vienna_city_marathon,Vienna City Marathon,marathon,"Wien, Österreich",2026,1,42.195,42.518,89,80,9,158,202,terrain-tiles,goandrace.com
+berlin_marathon,Berlin-Marathon,marathon,"Berlin, Deutschland",2025,1,42.195,42.746,42,42,0,32,54,opentopodata:bkg200m,goandrace.com
+wachau_marathon,Wachau-Marathon,marathon,"Emmersdorf–Krems, Österreich",2022,1,42.195,42.265,42,55,-13,196,213,terrain-tiles,AllTrails
+challenge_roth_run,Challenge Roth,triathlon_run,"Roth, Deutschland",offizielle Datei (Stand 2018),1,42.195,41.733,248,250,-2,328,369,opentopodata:bkg200m,challenge-roth.com
+ironman_austria_run,Ironman Austria,triathlon_run,"Klagenfurt, Österreich",Stand 2023,1,42.195,42.305,51,52,-1,441,448,terrain-tiles,hdsports.org
+ironman_hawaii_run,Ironman Hawaii,triathlon_run,"Kailua-Kona, USA",Stand 2022,1,42.195,42.815,292,292,1,0,48,opentopodata:ned10m,hdsports.org
+ironman_hamburg_run,Ironman Hamburg,triathlon_run,"Hamburg, Deutschland",Stand 2022,4,42.195,42.535,81,81,-0,3,10,opentopodata:bkg200m,hdsports.org
+challenge_roth_bike,Challenge Roth,triathlon_bike,"Roth, Deutschland",Streckenführung ab 2024,1,178.786,178.786,1555,1590,-35,347,561,opentopodata:bkg200m,challenge-roth.com
+ironman_austria_bike,Ironman Austria,triathlon_bike,"Klagenfurt, Österreich",klassische Runde (Datensatz 2011),2,175.134,175.134,1863,1863,-0,440,684,terrain-tiles,woerthersee.com
+ironman_hawaii_bike,Ironman Hawaii,triathlon_bike,"Kailua-Kona, USA",Stand 2022,1,181.310,181.310,1849,1849,-0,0,194,opentopodata:ned10m,hdsports.org
+ironman_hamburg_bike,Ironman Hamburg,triathlon_bike,"Hamburg, Deutschland",Stand 2022,2,180.029,180.029,509,509,-0,0,39,opentopodata:bkg200m,hdsports.org

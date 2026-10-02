@@ -1,0 +1,226 @@
+{
+  "courses": [
+    {
+      "id": "boston_marathon",
+      "event": "Boston Marathon",
+      "discipline": "marathon",
+      "location": "Boston, USA",
+      "gpx": "boston_marathon_2026.gpx",
+      "download": {"type": "file", "url": "https://www.goandrace.com/gpx/2026/04/20/gpx_20260420_id10941_race1_20260409222740.gpx"},
+      "course_version": "2026",
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:ned10m",
+      "source": {
+        "name": "goandrace.com",
+        "url": "https://www.goandrace.com/en/map/2026/boston-marathon-2026-boston-course-map-1.php"
+      }
+    },
+    {
+      "id": "new_york_city_marathon",
+      "event": "New York City Marathon",
+      "discipline": "marathon",
+      "location": "New York, USA",
+      "gpx": "new_york_city_marathon_2025.gpx",
+      "download": {"type": "file", "url": "https://www.goandrace.com/gpx/2025/11/02/gpx_20251102_id10470_race1_20250929105512.gpx"},
+      "course_version": "2025",
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:ned10m",
+      "source": {
+        "name": "goandrace.com",
+        "url": "https://www.goandrace.com/en/map/2025/tcs-new-york-city-marathon-2025-course-map-1.php"
+      },
+      "note": "Bridge decks from surveyed spot elevations (NYC Open Data); Verrazzano-Narrows Bridge on the upper level."
+    },
+    {
+      "id": "london_marathon",
+      "event": "London Marathon",
+      "discipline": "marathon",
+      "location": "London, Großbritannien",
+      "gpx": "london_marathon_2025.gpx",
+      "download": {"type": "file", "url": "https://www.goandrace.com/gpx/2025/04/27/gpx_20250427_id10099_race1_20241212094041.gpx"},
+      "course_version": "2025",
+      "official_distance_km": 42.195,
+      "elevation_source": "terrain-tiles",
+      "source": {
+        "name": "goandrace.com",
+        "url": "https://www.goandrace.com/en/map/2025/tcs-london-marathon-2025-course-map-1.php"
+      }
+    },
+    {
+      "id": "vienna_city_marathon",
+      "event": "Vienna City Marathon",
+      "discipline": "marathon",
+      "location": "Wien, Österreich",
+      "gpx": "vienna_city_marathon_2026.gpx",
+      "download": {"type": "file", "url": "https://www.goandrace.com/gpx/2026/04/19/gpx_20260419_id10942_race1_20260409221024.gpx"},
+      "course_version": "2026",
+      "official_distance_km": 42.195,
+      "elevation_source": "terrain-tiles",
+      "source": {
+        "name": "goandrace.com",
+        "url": "https://www.goandrace.com/en/map/2026/vienna-city-marathon-2026-vienna-course-map-1.php"
+      }
+    },
+    {
+      "id": "berlin_marathon",
+      "event": "Berlin-Marathon",
+      "discipline": "marathon",
+      "location": "Berlin, Deutschland",
+      "gpx": "berlin_marathon_2025.gpx",
+      "download": {"type": "file", "url": "https://www.goandrace.com/gpx/2025/09/21/gpx_20250921_id10469_race1_20250820171513.gpx"},
+      "course_version": "2025",
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:bkg200m",
+      "coarse_terrain_model": true,
+      "source": {
+        "name": "goandrace.com",
+        "url": "https://www.goandrace.com/en/map/2025/bmw-berlin-marathon-2025-course-map-1.php"
+      }
+    },
+    {
+      "id": "wachau_marathon",
+      "event": "Wachau-Marathon",
+      "discipline": "marathon",
+      "location": "Emmersdorf–Krems, Österreich",
+      "gpx": "../WACHAUmarathon_Marathon.gpx",
+      "course_version": "2022",
+      "official_distance_km": 42.195,
+      "elevation_source": "terrain-tiles",
+      "source": {
+        "name": "AllTrails",
+        "url": "https://www.alltrails.com"
+      }
+    },
+    {
+      "id": "challenge_roth_run",
+      "event": "Challenge Roth",
+      "discipline": "triathlon_run",
+      "location": "Roth, Deutschland",
+      "gpx": "challenge_roth_run_2018.gpx",
+      "download": {"type": "file", "url": "https://www.challenge-roth.com/files/downloads/Streckeninfo/DCR_Laufstrecke.gpx"},
+      "course_version": "offizielle Datei (Stand 2018)",
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:bkg200m",
+      "coarse_terrain_model": true,
+      "source": {
+        "name": "challenge-roth.com",
+        "url": "https://www.challenge-roth.com/en/course-info.html"
+      }
+    },
+    {
+      "id": "ironman_austria_run",
+      "event": "Ironman Austria",
+      "discipline": "triathlon_run",
+      "location": "Klagenfurt, Österreich",
+      "gpx": "ironman_austria_run.gpx",
+      "download": {"type": "hdsports", "url": "https://www.hdsports.org/strecken/551-triathlons/556-ironman-kaernten-laufstrecke"},
+      "course_version": "Stand 2023",
+      "official_distance_km": 42.195,
+      "elevation_source": "terrain-tiles",
+      "source": {
+        "name": "hdsports.org",
+        "url": "https://www.hdsports.org/strecken/551-triathlons/556-ironman-kaernten-laufstrecke"
+      }
+    },
+    {
+      "id": "ironman_hawaii_run",
+      "event": "Ironman Hawaii",
+      "discipline": "triathlon_run",
+      "location": "Kailua-Kona, USA",
+      "gpx": "ironman_hawaii_course.gpx",
+      "download": {"type": "hdsports", "url": "https://www.hdsports.org/strecken/551-triathlons/230-ironman-hawaii"},
+      "course_version": "Stand 2022",
+      "start_km": 185.37,
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:ned10m",
+      "source": {
+        "name": "hdsports.org",
+        "url": "https://www.hdsports.org/strecken/551-triathlons/230-ironman-hawaii"
+      },
+      "note": "The source track holds swim, bike and run in one file; the run starts at km 185.37."
+    },
+    {
+      "id": "ironman_hamburg_run",
+      "event": "Ironman Hamburg",
+      "discipline": "triathlon_run",
+      "location": "Hamburg, Deutschland",
+      "gpx": "ironman_hamburg_run_lap.gpx",
+      "download": {"type": "hdsports", "url": "https://www.hdsports.org/strecken/551-triathlons/179-ironman-hamburg-laufstrecke"},
+      "course_version": "Stand 2022",
+      "laps": 4,
+      "official_distance_km": 42.195,
+      "elevation_source": "opentopodata:bkg200m",
+      "coarse_terrain_model": true,
+      "source": {
+        "name": "hdsports.org",
+        "url": "https://www.hdsports.org/strecken/551-triathlons/179-ironman-hamburg-laufstrecke"
+      },
+      "note": "One lap in the source track, run four times."
+    },
+    {
+      "id": "challenge_roth_bike",
+      "event": "Challenge Roth",
+      "discipline": "triathlon_bike",
+      "location": "Roth, Deutschland",
+      "gpx": "challenge_roth_bike_2024.gpx",
+      "download": {"type": "zip", "url": "https://www.challenge-roth.com/files/downloads/Streckeninfo/DATEV%20Challenge%20Roth%20Bike%20Course.zip"},
+      "course_version": "Streckenführung ab 2024",
+      "elevation_source": "opentopodata:bkg200m",
+      "coarse_terrain_model": true,
+      "source": {
+        "name": "challenge-roth.com",
+        "url": "https://www.challenge-roth.com/en/course-info.html"
+      }
+    },
+    {
+      "id": "ironman_austria_bike",
+      "event": "Ironman Austria",
+      "discipline": "triathlon_bike",
+      "location": "Klagenfurt, Österreich",
+      "gpx": "ironman_austria_bike_lap.gpx",
+      "download": {"type": "file", "url": "https://data.woerthersee.com/gpx/a4210e3c-e469-49da-86c7-e1f657691778.gpx"},
+      "course_version": "klassische Runde (Datensatz 2011)",
+      "laps": 2,
+      "elevation_source": "terrain-tiles",
+      "source": {
+        "name": "woerthersee.com",
+        "url": "https://www.woerthersee.com/dc-neu/detail/Tour/ironman-runde-2011"
+      },
+      "note": "One lap of the classic Ironman loop, ridden twice. The race course since 2024 uses this loop again and is about 2 km longer per lap."
+    },
+    {
+      "id": "ironman_hawaii_bike",
+      "event": "Ironman Hawaii",
+      "discipline": "triathlon_bike",
+      "location": "Kailua-Kona, USA",
+      "gpx": "ironman_hawaii_course.gpx",
+      "download": {"type": "hdsports", "url": "https://www.hdsports.org/strecken/551-triathlons/230-ironman-hawaii"},
+      "course_version": "Stand 2022",
+      "start_km": 4.04,
+      "end_km": 185.37,
+      "elevation_source": "opentopodata:ned10m",
+      "source": {
+        "name": "hdsports.org",
+        "url": "https://www.hdsports.org/strecken/551-triathlons/230-ironman-hawaii"
+      },
+      "note": "The source track holds swim, bike and run in one file; the bike course runs from km 4.04 to km 185.37."
+    },
+    {
+      "id": "ironman_hamburg_bike",
+      "event": "Ironman Hamburg",
+      "discipline": "triathlon_bike",
+      "location": "Hamburg, Deutschland",
+      "gpx": "ironman_hamburg_bike_lap.gpx",
+      "download": {"type": "hdsports", "url": "https://www.hdsports.org/strecken/551-triathlons/178-ironman-hamburg-radstrecke"},
+      "course_version": "Stand 2022",
+      "laps": 2,
+      "elevation_source": "opentopodata:bkg200m",
+      "coarse_terrain_model": true,
+      "source": {
+        "name": "hdsports.org",
+        "url": "https://www.hdsports.org/strecken/551-triathlons/178-ironman-hamburg-radstrecke"
+      },
+      "note": "One lap in the source track, ridden twice."
+    }
+  ]
+}

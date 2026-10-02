@@ -18,7 +18,12 @@ setup(
     python_requires=">=3.10",
     packages=find_packages(include=["OverallAltitude", "OverallAltitude.*"]),
     include_package_data=True,
-    package_data={"OverallAltitude": ["RawMaterial/*.gpx"]},
+    package_data={
+        "OverallAltitude": [
+            "RawMaterial/*.gpx",
+            "RawMaterial/races/*.json",
+        ]
+    },
     project_urls={
         "Source": "https://github.com/Mw1n23/OverallAltitude",
         "Issues": "https://github.com/Mw1n23/OverallAltitude/issues",
@@ -30,6 +35,8 @@ setup(
     entry_points={
         "console_scripts": [
             "overall-altitude=OverallAltitude.Code.Track_analysis_05:main",
+            "overall-altitude-races=OverallAltitude.Code.race_comparison:main",
+            "overall-altitude-fetch-tracks=OverallAltitude.Code.fetch_race_tracks:main",
         ]
     },
 )
