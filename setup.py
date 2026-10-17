@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from setuptools import find_packages, setup
+from setuptools import find_namespace_packages, setup
 
 
 README = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
@@ -16,7 +16,8 @@ setup(
     license="MIT",
     url="https://github.com/Mw1n23/OverallAltitude",
     python_requires=">=3.10",
-    packages=find_packages(include=["OverallAltitude", "OverallAltitude.*"]),
+    # Namespace discovery also lists the data folders (RawMaterial) as packages.
+    packages=find_namespace_packages(include=["OverallAltitude", "OverallAltitude.*"], exclude=["*.__pycache__"]),
     include_package_data=True,
     package_data={
         "OverallAltitude": [
