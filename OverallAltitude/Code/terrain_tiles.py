@@ -5,26 +5,39 @@ best open terrain model per region (e.g. 10 m lidar DTM in Austria, 2 m lidar in
 England, 10 m 3DEP in the USA), which is far less noisy along roads than the 25-30 m
 surface models served by the public OpenTopoData endpoint.
 
-Only the standard library is used, including the PNG decoding.
+Only the standard library is required. Pillow, which comes with the ``plot`` extra,
+decodes the tiles about twenty times faster; without it a pure-Python decoder is used.
 """
 
 from __future__ import annotations
 
+import http.client
+import io
 import math
+import os
 import struct
-import urllib.error
+import tempfile
 import urllib.request
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence
 
 from .track_types import ElevationServiceError, TrackPoint
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
 
 TILE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{zoom}/{x}/{y}.png"
 TILE_SIZE = 256
 DEFAULT_ZOOM = 14
+DOWNLOAD_WORKERS = 8
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# Errors of a broken or unsupported tile file, from either decoder.
+TILE_DECODE_ERRORS = (ValueError, OSError, struct.error, zlib.error)
 
 
 def _paeth(left: int, up: int, up_left: int) -> int:
@@ -107,6 +120,16 @@ def decode_rgb_png(payload: bytes) -> tuple[int, int, bytes]:
     return width, height, bytes(rgb)
 
 
+def decode_tile_png(payload: bytes) -> tuple[int, int, bytes]:
+    """Decode a tile like ``decode_rgb_png``, with Pillow when it is installed."""
+    if Image is None:
+        return decode_rgb_png(payload)
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG" or image.mode not in ("RGB", "RGBA"):
+            raise ValueError(f"Unsupported tile image ({image.format}, mode {image.mode}).")
+        return image.width, image.height, image.convert("RGB").tobytes()
+
+
 def terrarium_elevation_m(red: int, green: int, blue: int) -> float:
     return red * 256 + green + blue / 256 - 32768
 
@@ -138,33 +161,55 @@ class TerrainTileClient:
     def _tile_path(self, tile_x: int, tile_y: int) -> Path:
         return self.cache_dir / str(self.zoom) / str(tile_x) / f"{tile_y}.png"
 
-    def _load_tile(self, tile_x: int, tile_y: int) -> bytes:
-        key = (tile_x, tile_y)
-        if key in self._tiles:
-            return self._tiles[key]
-
-        path = self._tile_path(tile_x, tile_y)
-        if not path.exists():
-            url = self.url_template.format(zoom=self.zoom, x=tile_x, y=tile_y)
-            request = urllib.request.Request(url, headers={"User-Agent": "OverallAltitude/2.0"})
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                    payload = response.read()
-            except urllib.error.URLError as exc:
-                raise ElevationServiceError(f"Cannot fetch terrain tile {url}: {exc}") from exc
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(payload)
-
-        width, height, pixels = decode_rgb_png(path.read_bytes())
+    def _decode(self, payload: bytes, source: str) -> bytes:
+        try:
+            width, height, pixels = decode_tile_png(payload)
+        except TILE_DECODE_ERRORS as exc:
+            raise ElevationServiceError(f"Terrain tile {source} cannot be decoded: {exc}") from exc
         if width != TILE_SIZE or height != TILE_SIZE:
-            raise ElevationServiceError(f"Terrain tile {path} is not {TILE_SIZE}x{TILE_SIZE} pixels.")
-        self._tiles[key] = pixels
+            raise ElevationServiceError(f"Terrain tile {source} is not {TILE_SIZE}x{TILE_SIZE} pixels.")
         return pixels
 
+    def _download(self, tile_x: int, tile_y: int) -> bytes:
+        """Fetch a tile, check that it decodes and store it in the cache; returns its pixels."""
+        url = self.url_template.format(zoom=self.zoom, x=tile_x, y=tile_y)
+        request = urllib.request.Request(url, headers={"User-Agent": "OverallAltitude/2.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = response.read()
+        except (OSError, http.client.HTTPException) as exc:
+            raise ElevationServiceError(f"Cannot fetch terrain tile {url}: {exc}") from exc
+        pixels = self._decode(payload, url)
+
+        # Write through a temporary file so an interrupted run never leaves a broken tile.
+        path = self._tile_path(tile_x, tile_y)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".part")
+        try:
+            with os.fdopen(handle, "wb") as file:
+                file.write(payload)
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+        return pixels
+
+    def _load_tile(self, tile_x: int, tile_y: int) -> bytes:
+        key = (tile_x, tile_y)
+        if key not in self._tiles:
+            path = self._tile_path(tile_x, tile_y)
+            if path.exists():
+                self._tiles[key] = self._decode(path.read_bytes(), f"{path} (delete it to download it again)")
+            else:
+                self._tiles[key] = self._download(tile_x, tile_y)
+        return self._tiles[key]
+
+    def _clamp_pixel(self, pixel: int) -> int:
+        return min(max(pixel, 0), TILE_SIZE * 2**self.zoom - 1)
+
     def _pixel_elevation(self, pixel_x: int, pixel_y: int) -> float:
-        last = TILE_SIZE * 2**self.zoom - 1
-        pixel_x = min(max(pixel_x, 0), last)
-        pixel_y = min(max(pixel_y, 0), last)
+        pixel_x = self._clamp_pixel(pixel_x)
+        pixel_y = self._clamp_pixel(pixel_y)
         pixels = self._load_tile(pixel_x // TILE_SIZE, pixel_y // TILE_SIZE)
         index = ((pixel_y % TILE_SIZE) * TILE_SIZE + pixel_x % TILE_SIZE) * 3
         return terrarium_elevation_m(pixels[index], pixels[index + 1], pixels[index + 2])
@@ -182,5 +227,26 @@ class TerrainTileClient:
             + weight_x * weight_y * self._pixel_elevation(x0 + 1, y0 + 1)
         )
 
+    def _prefetch(self, points: Sequence[TrackPoint]) -> None:
+        """Download the tiles that the points need and that are not cached, in parallel."""
+        needed: set[tuple[int, int]] = set()
+        for point in points:
+            x, y = pixel_position(point.latitude, point.longitude, self.zoom)
+            for pixel_x in (math.floor(x), math.floor(x) + 1):
+                for pixel_y in (math.floor(y), math.floor(y) + 1):
+                    needed.add(
+                        (self._clamp_pixel(pixel_x) // TILE_SIZE, self._clamp_pixel(pixel_y) // TILE_SIZE)
+                    )
+        missing = sorted(
+            key for key in needed if key not in self._tiles and not self._tile_path(*key).exists()
+        )
+        if len(missing) < 2:
+            return
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+            downloads = [pool.submit(self._download, *key) for key in missing]
+            for key, download in zip(missing, downloads):
+                self._tiles[key] = download.result()
+
     def lookup(self, points: Sequence[TrackPoint]) -> list[float]:
+        self._prefetch(points)
         return [self.elevation(point.latitude, point.longitude) for point in points]

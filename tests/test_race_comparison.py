@@ -1,8 +1,10 @@
 import importlib.util
+import io
 import json
 import struct
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 import zlib
 from pathlib import Path
@@ -384,6 +386,69 @@ class TerrainTileTests(unittest.TestCase):
             elevation = client.elevation(48.2, 16.37)
 
         self.assertAlmostEqual(elevation, 100.0 + (pixel_x - tile_x * size), places=6)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow is not installed")
+    def test_pillow_decoder_matches_standard_library_decoder(self) -> None:
+        width, height = 7, 10
+        rgb = bytes((row * 13 + column * 29 + channel * 5) % 256 for row in range(height) for column in range(width) for channel in range(3))
+        payload = encode_png(width, height, rgb, [0, 1, 2, 3, 4])
+
+        self.assertEqual(terrain_tiles.decode_tile_png(payload), terrain_tiles.decode_rgb_png(payload))
+        with mock.patch.object(terrain_tiles, "Image", None):
+            self.assertEqual(terrain_tiles.decode_tile_png(payload), (width, height, rgb))
+
+    def flat_tile(self, elevation_m: int) -> bytes:
+        value = 32768 + elevation_m
+        size = terrain_tiles.TILE_SIZE
+        return encode_png(size, size, bytes((value // 256, value % 256, 0)) * (size * size), [0])
+
+    def test_missing_tiles_are_downloaded_once_and_cached(self) -> None:
+        tile = self.flat_tile(100)
+        # Two points about two tiles apart (a zoom-14 tile spans 0.022 degrees of longitude).
+        points = [TrackPoint(48.2, 16.37, None), TrackPoint(48.2, 16.414, None)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(
+                terrain_tiles.urllib.request, "urlopen", side_effect=lambda request, timeout: io.BytesIO(tile)
+            ) as urlopen:
+                elevations = terrain_tiles.TerrainTileClient(Path(tmpdir)).lookup(points)
+                urls = [call.args[0].full_url for call in urlopen.call_args_list]
+            cached = sorted(path.name for path in Path(tmpdir).rglob("*") if path.is_file())
+
+            with mock.patch.object(terrain_tiles.urllib.request, "urlopen") as urlopen_again:
+                again = terrain_tiles.TerrainTileClient(Path(tmpdir)).lookup(points)
+
+        for elevation in elevations:
+            self.assertAlmostEqual(elevation, 100.0, places=9)
+        self.assertGreaterEqual(len(urls), 2)
+        self.assertEqual(len(urls), len(set(urls)))
+        self.assertEqual(len(cached), len(urls))
+        self.assertTrue(all(name.endswith(".png") for name in cached))
+        self.assertEqual(again, elevations)
+        urlopen_again.assert_not_called()
+
+    def test_failed_download_raises_service_error_and_caches_nothing(self) -> None:
+        points = [TrackPoint(48.2, 16.37, None), TrackPoint(48.2, 16.414, None)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(
+                terrain_tiles.urllib.request, "urlopen", side_effect=urllib.error.URLError("offline")
+            ):
+                with self.assertRaises(track_analysis.ElevationServiceError):
+                    terrain_tiles.TerrainTileClient(Path(tmpdir)).lookup(points)
+            leftovers = [path for path in Path(tmpdir).rglob("*") if path.is_file()]
+
+        self.assertEqual(leftovers, [])
+
+    def test_damaged_cached_tile_raises_service_error(self) -> None:
+        zoom = 14
+        pixel_x, pixel_y = terrain_tiles.pixel_position(48.2, 16.37, zoom)
+        size = terrain_tiles.TILE_SIZE
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tile_file = Path(tmpdir) / str(zoom) / str(int(pixel_x) // size) / f"{int(pixel_y) // size}.png"
+            tile_file.parent.mkdir(parents=True)
+            tile_file.write_bytes(self.flat_tile(100)[:500])
+
+            with self.assertRaisesRegex(track_analysis.ElevationServiceError, "delete it"):
+                terrain_tiles.TerrainTileClient(Path(tmpdir), zoom=zoom).elevation(48.2, 16.37)
 
 
 class StructureDetectionTests(unittest.TestCase):
