@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import os
@@ -62,6 +63,7 @@ class AnalysisResult:
     raw_point_count: int
     analysis_point_count: int
     raw_distances_m: list[float]
+    # Empty when the GPX file carries no elevations (possible with terrain model sources).
     raw_elevations_m: list[float]
     analysis_distances_m: list[float]
     analysis_elevations_m: list[float]
@@ -278,7 +280,8 @@ class OpenTopoDataClient:
                     time.sleep(sleep_seconds)
                     continue
                 raise ElevationServiceError(f"Cannot reach elevation service: {exc}") from exc
-            except urllib.error.URLError as exc:
+            except (OSError, http.client.HTTPException) as exc:
+                # URLError, read timeouts and dropped connections.
                 raise ElevationServiceError(f"Cannot reach elevation service: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise ElevationServiceError("Elevation service returned invalid JSON.") from exc
@@ -568,7 +571,9 @@ def analyze_track(
         raise ValueError("Bridge and tunnel sections can only correct terrain model elevations.")
 
     raw_distances_m = cumulative_distances(points)
-    raw_elevations_m = extract_embedded_elevations(points)
+    # Terrain model sources do not need GPX elevations; the gpx source checks them below.
+    has_gpx_elevations = all(point.elevation_m is not None for point in points)
+    raw_elevations_m = extract_embedded_elevations(points) if has_gpx_elevations else []
     average_point_spacing_m = (
         raw_distances_m[-1] / max(1, len(points) - 1)
         if len(points) > 1
@@ -704,13 +709,14 @@ def plot_elevation_profile(
         return
 
     figure, primary_axis = plt.subplots(figsize=(12, 6))
-    primary_axis.plot(
-        result.raw_distances_m,
-        result.raw_elevations_m,
-        label="GPX elevation",
-        color="lightgray",
-        linewidth=1.0,
-    )
+    if result.raw_elevations_m:
+        primary_axis.plot(
+            result.raw_distances_m,
+            result.raw_elevations_m,
+            label="GPX elevation",
+            color="lightgray",
+            linewidth=1.0,
+        )
     primary_axis.plot(
         result.analysis_distances_m,
         result.analysis_elevations_m,
@@ -718,7 +724,7 @@ def plot_elevation_profile(
         color="blue",
         linewidth=1.4,
     )
-    primary_axis.set_xlabel("Distanz (m)")
+    primary_axis.set_xlabel("Distanz (km)")
     primary_axis.set_ylabel("Hoehe (m)")
     primary_axis.grid(True)
 
@@ -911,10 +917,7 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_arguments()
-    gpx_file = args.gpx_file
-    if not gpx_file.is_absolute():
-        gpx_file = (SCRIPT_PATH.parent / gpx_file).resolve()
-
+    gpx_file = args.gpx_file.resolve()
     if not gpx_file.exists():
         raise FileNotFoundError(f"GPX file not found at: {gpx_file}")
 

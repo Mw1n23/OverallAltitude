@@ -159,6 +159,47 @@ class TrackAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(result.total_ascent_m, 4.0)
         self.assertAlmostEqual(result.total_descent_m, 3.0)
 
+    def test_terrain_source_needs_no_gpx_elevations(self) -> None:
+        points = [
+            module.TrackPoint(48.0, 15.0, None),
+            module.TrackPoint(48.0, 15.001, None),
+            module.TrackPoint(48.0, 15.002, None),
+        ]
+
+        with mock.patch.object(module.TerrainTileClient, "lookup", return_value=[200.0, 204.0, 201.0]):
+            result = analyze_with_defaults(points, elevation_source="terrain-tiles")
+
+        self.assertEqual(result.raw_elevations_m, [])
+        self.assertAlmostEqual(result.total_ascent_m, 4.0)
+        self.assertAlmostEqual(result.total_descent_m, 3.0)
+
+    def test_gpx_source_requires_gpx_elevations(self) -> None:
+        points = [module.TrackPoint(48.0, 15.0, None), module.TrackPoint(48.0, 15.001, None)]
+
+        with self.assertRaisesRegex(ValueError, "does not contain elevation data"):
+            analyze_with_defaults(points, elevation_source="gpx")
+
+    def test_cli_reads_relative_gpx_path_from_working_directory(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "OverallAltitude",
+                "--gpx-file",
+                "OverallAltitude/RawMaterial/WACHAUmarathon_Marathon.gpx",
+                "--elevation-source",
+                "gpx",
+                "--no-plot",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Gesamtanstieg", result.stdout)
+
     def test_strict_terrain_tiles_source_does_not_fall_back(self) -> None:
         points = [
             module.TrackPoint(48.0, 15.0, 120.0),
