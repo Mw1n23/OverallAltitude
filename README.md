@@ -60,7 +60,7 @@ python -m pip install --upgrade pip
 python -m pip install -e .[plot]
 ```
 
-`matplotlib` is optional and is only needed for plotting. The core analysis itself uses the Python standard library.
+The `plot` extra is optional: `matplotlib` draws the figures, and Pillow, which comes with it, decodes terrain tiles about twenty times faster. Without it the analysis runs on the Python standard library alone.
 
 ## Run
 
@@ -88,7 +88,7 @@ The same run with the bridge and tunnel sections of the course corrected (the te
 overall-altitude --course-id wachau_marathon
 ```
 
-Explicit GPX input:
+Explicit GPX input (relative paths start from the current directory; with terrain model elevations the file may lack elevations):
 
 ```bash
 overall-altitude --gpx-file OverallAltitude/RawMaterial/WACHAUmarathon_Marathon.gpx
@@ -118,7 +118,7 @@ Important options:
 - `--threshold 2`: minimum reversal in meters that separates a climb from a descent.
 - `--dataset eudem25m,mapzen`: DEM dataset stack used with `--elevation-source opentopodata`.
 - `--course-id <id>`: correct the bridge and tunnel sections listed for this course in `OverallAltitude/RawMaterial/races/structures.json`.
-- `--cache-db ~/.cache/overall-altitude/elevation_cache.sqlite3`: SQLite cache for repeated runs; terrain tiles are cached in the folder next to it.
+- `--cache-db ~/.cache/overall-altitude/elevation_cache.sqlite3`: SQLite cache for repeated runs; terrain tiles are cached in the folder next to it. Missing tiles are downloaded in parallel.
 - `--plot / --no-plot`: enable or disable plotting.
 
 ## Race comparison

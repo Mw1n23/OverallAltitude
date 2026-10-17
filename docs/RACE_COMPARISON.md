@@ -172,4 +172,5 @@ sample track is part of it. The manifest names the download location of every ot
 
    Copy the short bridges into `structures.json`. Check tunnels and long bridges by hand:
    OpenStreetMap cannot tell whether the course uses a tunnel or the road above it.
+
 3. Run `overall-altitude-races`.
